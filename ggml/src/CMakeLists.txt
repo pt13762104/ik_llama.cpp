@@ -403,6 +403,11 @@ if (GGML_CUDA)
             add_compile_definitions(GGML_CUDA_FORCE_MMQ)
         endif()
 
+        if (GGML_CUDA_NO_TURING_MMA)
+            add_compile_definitions(GGML_CUDA_NO_TURING_MMA)
+            add_compile_definitions(GGML_CUDA_FORCE_MMQ)
+        endif()
+
         if (GGML_CUDA_IQK_FORCE_BF16)
             add_compile_definitions(GGML_CUDA_IQK_FORCE_BF16)
         endif()
@@ -1181,7 +1186,7 @@ if (GGML_CUDA)
 
         list(APPEND CUDA_FLAGS -compress-mode=${GGML_CUDA_COMPRESSION_MODE})
     endif()
-	
+
     if (GGML_FATAL_WARNINGS)
         list(APPEND CUDA_FLAGS -Werror all-warnings)
     endif()
