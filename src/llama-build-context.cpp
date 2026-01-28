@@ -1207,6 +1207,19 @@ llm_expert_gating_func_type   gating_op,
                 GGML_ASSERT(!split_up_b_shexp   || split_up_b_shexp->n_device   == split_up_shexp->n_device);
                 GGML_ASSERT(!split_gate_b_shexp || split_gate_b_shexp->n_device == split_up_shexp->n_device);
                 GGML_ASSERT(!split_down_b_shexp || split_down_b_shexp->n_device == split_up_shexp->n_device);
+                bool down_bias_added = false;
+                int id_add_routed = -1;
+                if (split_up_shexp->splits[lctx.model.main_gpu]) {
+                    id_add_routed = lctx.model.main_gpu;
+                } else {
+                    for (int id = 0; id < split_up_shexp->n_device; ++id) {
+                        if (split_up_shexp->splits[id]) {
+                            id_add_routed = id;
+                            break;
+                        }
+                    }
+                }
+                GGML_ASSERT(id_add_routed >= 0);
                 for (int id = 0; id < split_up_shexp->n_device; ++id) {
                     int il_cb = 1000*id + il;
                     GGML_ASSERT((split_up_shexp->splits[id] && split_gate_shexp->splits[id] && split_down_shexp->splits[id]) ||
@@ -1216,32 +1229,18 @@ llm_expert_gating_func_type   gating_op,
                     auto shared_out = llm_build_ffn(ctx, lctx, the_ffn_norm, input,
                             split_up_shexp->splits[id],   split_up_b_shexp   ? split_up_b_shexp->splits[id]   : nullptr, nullptr,
                             split_gate_shexp->splits[id], split_gate_b_shexp ? split_gate_b_shexp->splits[id] : nullptr, nullptr,
-                            split_down_shexp->splits[id], split_down_b_shexp ? split_down_b_shexp->splits[id] : nullptr, nullptr,
-                            nullptr, type_op_shexp, LLM_FFN_PAR, cb, il);
+                            split_down_shexp->splits[id], !down_bias_added && split_down_b_shexp ? split_down_b_shexp->splits[id] : nullptr, nullptr,
+                            nullptr, type_op_shexp, LLM_FFN_PAR, cb, il, graph, false, false,
+                            id == id_add_routed ? routed_out : nullptr);
                     cb(shared_out, "ffn_shexp_out", il_cb);
                     if (shared_out->ne[1] > 32 && lctx.cparams.reduce_type != GGML_TYPE_F32) {
                         shared_out = ggml_cast(ctx, shared_out, lctx.cparams.reduce_type);
                     }
+                    down_bias_added = true;
                     results.push_back(shared_out);
                 }
                 GGML_ASSERT(!results.empty());
-                if (results.size() == 1) {
-                    cur = results.front();
-                } else {
-                    cur = ggml_add(ctx, results[0], results[1]);
-                    cur->op_params[0] = 0xff;
-                    cb(cur, "ffn_shared_combined", il);
-                    for (int id = 2; id < int(results.size()); ++id) {
-                        cur = ggml_add(ctx, cur, results[id]);
-                        cb(cur, "ffn_shared_combined", il);
-                    }
-                }
-                if (routed_out->ne[1] > 32 && lctx.cparams.reduce_type != GGML_TYPE_F32) {
-                    auto routed_out_f16 = ggml_cast(ctx, routed_out, lctx.cparams.reduce_type);
-                    cur = ggml_add(ctx, routed_out_f16, cur);
-                } else {
-                    cur = ggml_add(ctx, routed_out, cur);
-                }
+                cur = ggml_reduce(ctx, results.data(), split_up_shexp->n_device, GGML_OP_ADD);
                 cb(cur, "ffn_out", il);
             } else {
                 auto shared_out = llm_build_ffn(ctx, lctx, nullptr, cur,
@@ -1381,6 +1380,17 @@ static ggml_tensor * llm_build_kqv(
     constexpr bool use_f32_precision = false;
 #endif
 
+    bool should_use_f32_precision = use_f32_precision
+                                  || model.arch == LLM_ARCH_PHI2
+                                  || model.arch == LLM_ARCH_PHI3
+                                  || model.arch == LLM_ARCH_GPTNEOX
+                                  || model.arch == LLM_ARCH_QWEN2
+                                  || model.arch == LLM_ARCH_COHERE2
+                                  || model.arch == LLM_ARCH_GLM4
+                                  || model.arch == LLM_ARCH_GLM4_MOE
+                                  || model.arch == LLM_ARCH_MIMO2;
+                               // || (model.arch == LLM_ARCH_DEEPSEEK2 && q->ne[1] <= 8);
+
     struct ggml_tensor * cur;
 
     if (cparams.flash_attn) {
@@ -1397,7 +1407,7 @@ static ggml_tensor * llm_build_kqv(
         cb(v, "v", il);
 
         cur = ggml_flash_attn_ext(ctx, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
-                                  hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+                hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
         ggml_flash_attn_ext_add_sinks(cur, sinks);
         if (n_swa > 0) {
             ((int32_t *)cur->op_params)[4] = n_swa;
@@ -1406,8 +1416,7 @@ static ggml_tensor * llm_build_kqv(
         // Some models produced NaNs/gibberish when FA is computed with f16 precision on CUDA
         // For DeepSeek-2, it is perfectly fine with fp16 for PP, but I get gibberish when uding fp16 for TG.
         // Not sure if it is really a matter of insufficient precision, or I have made a mistake in the fattn-vec-f16 kernel.
-        if (use_f32_precision || model.arch == LLM_ARCH_PHI2 || model.arch == LLM_ARCH_PHI3 || model.arch == LLM_ARCH_GPTNEOX ||
-            (model.arch == LLM_ARCH_DEEPSEEK2 && q->ne[1] <= 8) || model.arch == LLM_ARCH_COHERE2 || model.arch == LLM_ARCH_GLM4 || model.arch == LLM_ARCH_GLM4_MOE) {
+        if (should_use_f32_precision) {
             ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
         }
         //ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
@@ -1431,8 +1440,7 @@ static ggml_tensor * llm_build_kqv(
 
             //ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
 
-            if (use_f32_precision || model.arch == LLM_ARCH_PHI2 || model.arch == LLM_ARCH_PHI3 || model.arch == LLM_ARCH_GPTNEOX || model.arch == LLM_ARCH_QWEN2 ||
-                model.arch == LLM_ARCH_COHERE2 || model.arch == LLM_ARCH_GLM4 || model.arch == LLM_ARCH_GLM4_MOE || model.arch == LLM_ARCH_MIMO2) {
+            if (should_use_f32_precision) {
                 // for this arch, we need to perform the KQ multiplication with F32 precision, otherwise we get NaNs
                 // ref: https://github.com/ggerganov/llama.cpp/pull/4490#issuecomment-1859055847
                 ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
@@ -9182,6 +9190,22 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
 
     float freq_base_l  = n_swa > 0 ? hparams.rope_freq_base_train_swa : cparams.rope_freq_base;
     float freq_scale_l = n_swa > 0 ? hparams.rope_freq_scale_train_swa : hparams.rope_freq_scale_train;
+#ifdef GGML_USE_VULKAN
+    constexpr bool use_f32_precision = true;
+#else
+    constexpr bool use_f32_precision = false;
+#endif
+
+    bool should_use_f32_precision = use_f32_precision
+                                  ||  model.arch == LLM_ARCH_PHI2
+                                  || model.arch == LLM_ARCH_PHI3
+                                  || model.arch == LLM_ARCH_GPTNEOX
+                                  || model.arch == LLM_ARCH_QWEN2
+                                  || model.arch == LLM_ARCH_COHERE2
+                                  || model.arch == LLM_ARCH_GLM4
+                               //   || model.arch == LLM_ARCH_GLM4_MOE
+                                  || model.arch == LLM_ARCH_MIMO2;
+                               // || (model.arch == LLM_ARCH_DEEPSEEK2 && q->ne[1] <= 8);
 
     if (!model.layers[il].wqkv && !model.layers[il].wqk && cparams.flash_attn &&
          model.layers[il].wq->extra && model.layers[il].wk->extra && model.layers[il].wv->extra && model.layers[il].wo->extra) {
@@ -9324,13 +9348,8 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                              ggml_row_size(split_vl->type, n_embd_head_v), 0);
                 cb(v, "v", il_cb);
 
-#ifdef GGML_USE_VULKAN
-                constexpr bool use_f32_precision = true;
-#else
-                constexpr bool use_f32_precision = false;
-#endif
                 cur = ggml_flash_attn_ext(ctx0, q, k, v, KQ_mask, KQ_scale, hparams.f_max_alibi_bias,
-                                  hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+                        hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
                 cb(cur, "flash_attn", il_cb);
                 if (model.layers[il].attn_sinks && model.layers[il].attn_sinks->extra) {
                     auto split = (ggml_split_tensor_t *)model.layers[il].attn_sinks->extra;
@@ -9344,9 +9363,7 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                     ((int32_t *)cur->op_params)[4] = n_swa;
                 }
                 // Some models produced NaNs/gibberish when FA is computed with f16 precision on CUDA
-                if (use_f32_precision || model.arch == LLM_ARCH_PHI2 || model.arch == LLM_ARCH_PHI3 || model.arch == LLM_ARCH_GPTNEOX ||
-                        (model.arch == LLM_ARCH_DEEPSEEK2 && q->ne[1] <= 8) || model.arch == LLM_ARCH_COHERE2 || model.arch == LLM_ARCH_GLM4 ||
-                        model.arch == LLM_ARCH_GLM4_MOE) {
+                if (should_use_f32_precision) {
                     ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
                 }
 
