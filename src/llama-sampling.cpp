@@ -102,7 +102,7 @@ static void llama_sort(llama_token_data_array * candidates, int32_t k) {
     candidates->sorted = true;
 }
 
-void llama_sample_softmax_impl(struct llama_sampling * smpl, llama_token_data_array * candidates) {
+void llama_sample_softmax_impl(struct llama_sampling * smpl, llama_token_data_array * candidates, bool normalize) {
     GGML_ASSERT(candidates->size > 0);
 
     const int64_t t_start_sample_us = ggml_time_us();
@@ -117,9 +117,12 @@ void llama_sample_softmax_impl(struct llama_sampling * smpl, llama_token_data_ar
         candidates->data[i].p = p;
         cum_sum += p;
     }
-    for (size_t i = 0; i < candidates->size; ++i) {
-        candidates->data[i].p /= cum_sum;
+    if (normalize) {
+        for (size_t i = 0; i < candidates->size; ++i) {
+            candidates->data[i].p /= cum_sum;
+        }
     }
+
 
     if (smpl) {
         smpl->t_sample_us += ggml_time_us() - t_start_sample_us;
@@ -1075,9 +1078,13 @@ llama_token llama_sample_token_adaptive_p_impl(
     GGML_ASSERT(iter != ctx->cum_probs.end());
     const size_t idx = std::distance(ctx->cum_probs.begin(), iter);
     llama_token id = candidates->data[idx].id;
-
     GGML_ASSERT(id < int(ctx->orig_prob.size()));
-    if (auto update_prob = ctx->orig_prob[id]; update_prob > 0) {
+
+    // update history
+    const float update_prob = ctx->updt_w_cur
+    ? candidates->data[idx].p / ctx->cum_cur_p
+    : ctx->orig_prob[id] / ctx->cum_orig_prob;
+    if (update_prob > 0) {
         ctx->weighted_sum = ctx->decay * ctx->weighted_sum + update_prob;
         ctx->total_weight = ctx->decay * ctx->total_weight + 1.0f;
     }
@@ -1111,6 +1118,7 @@ void llama_sample_adaptive_p_impl(struct llama_sampling * ctx, llama_token_data_
         candidates->data[i].p = prob;
         cum_sum += prob;
     }
+    adapt_p_ctx->cum_cur_p = cum_sum;
 
     // compute adapted target probability
     const float target = std::clamp(adapt_p_ctx->target, 0.0f, 1.0f);
@@ -1146,6 +1154,10 @@ void llama_prep_adaptive_p_impl(
               struct llama_sampling * smpl,
              llama_token_data_array * candidates,
     struct llama_sampler_adaptive_p * adapt_p_ctx) {
+    if (adapt_p_ctx->updt_w_cur) {
+        // update with current probability, original not needed
+        return;
+    }
     constexpr float kDelta = 30.0f; //16.6f;
     auto t_start = ggml_time_us();
     auto & orig_prob = adapt_p_ctx->orig_prob;
@@ -1169,17 +1181,20 @@ void llama_prep_adaptive_p_impl(
 struct llama_sampler_adaptive_p * llama_init_adaptive_p_impl(int n_vocab,
        const float target,
        const float decay,
+        const bool updt_w_cur,
     const uint32_t seed) {
     GGML_ASSERT(n_vocab > 0);
     const float clamped_decay = std::clamp(decay, 0.0f, 0.99f);
     auto result = new llama_sampler_adaptive_p {
         /* .target          = */ target,
         /* .decay           = */ clamped_decay,
+        /* .updt_w_cur      = */ updt_w_cur,
         /* .rng             = */ std::mt19937(seed),
         /* .weighted_sum    = */ target / (1.0f - clamped_decay),
         /* .total_weight    = */ 1.0f / (1.0f - clamped_decay),
         /* .orig_prob       = */ {},
-        /* .cum_orig_prob   = */ 0.0f,
+        /* .cum_orig_prob   = */ 1.0f,
+        /* .cum_cur_p       = */ 1.0f,
         /* .max_xform_logit = */ -INFINITY,
         /* .cum_probs       = */ {},
     };
@@ -1205,7 +1220,7 @@ static const char* llama_sampler_grammar_name(const struct llama_sampler* /*smpl
 static void llama_sampler_grammar_accept_impl(struct llama_sampler* smpl, llama_token token) {
     auto* ctx = (llama_sampler_grammar*)smpl->ctx;
     if (ctx->grammar) {
-        llama_grammar_accept_token_impl(ctx->grammar,ctx->vocab ,nullptr, token);
+        llama_grammar_accept_impl(*ctx->grammar,ctx->vocab ,nullptr, token);
     }
 }
 

@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <cinttypes>
+#include <deque>
 
 
 
@@ -110,6 +111,16 @@ static T json_value(const json& body, const std::string& key, const T& default_v
         return default_value;
     }
 }
+
+// Control vector container for dynamic management
+struct control_vector_container {
+    std::string path;
+    float scale;
+    int32_t layer_start;
+    int32_t layer_end;
+    llama_control_vector_data data;
+    bool applied;
+};
 
 // thin wrapper around common_grammar_trigger with (de)serialization functions
 struct server_grammar_trigger {
@@ -215,10 +226,14 @@ struct completion_token_output {
     static json probs_vector_to_json(const std::vector<completion_token_output>& probs, bool post_sampling_probs);
 };
 
+using completion_token_outputs = std::deque<completion_token_output>;
+
 // convert a vector of completion_token_output to json
 json probs_vector_to_json(const llama_context* ctx, const std::vector<completion_token_output>& probs);
 
 bool server_sent_event(httplib::DataSink& sink, const json& data);
+
+bool server_sent_oai_resp_event(httplib::DataSink& sink, const json& data);
 
 bool server_sent_anthropic_event(httplib::DataSink& sink, const json& data);
 
@@ -245,6 +260,9 @@ json oaicompat_chat_params_parse(
     json& body, /* openai api json semantics */
     const oaicompat_parser_options& opt,
     std::vector<raw_buffer>& out_files);
+
+// convert OpenAI Responses API format to OpenAI Chat Completions API format
+json convert_responses_to_chatcmpl(const json& body);
 
 json anthropic_params_from_json(
     const struct llama_model* model,
@@ -461,4 +479,3 @@ bool prompt_cache_equal(llama_context* ctx, const server_tokens& cache_tokens,
     const server_tokens& prompt_tokens, size_t start, const common_prefix& prefix);
 
 std::string safe_json_to_str(const json& data);
-

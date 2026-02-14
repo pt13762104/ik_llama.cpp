@@ -63,8 +63,6 @@ add_library(${TARGET} STATIC
     sampling.cpp
     console.h
     console.cpp
-    grammar-parser.h
-    grammar-parser.cpp
     json-partial.h
     json-partial.cpp
     llguidance.cpp
@@ -73,9 +71,13 @@ add_library(${TARGET} STATIC
     train.cpp
     log.cpp
     log.h    
-    ngram-cache.h
     ngram-cache.cpp
-    speculative.cpp
+    ngram-cache.h
+    ngram-map.cpp
+    ngram-map.h
+	speculative.cpp
+    ngram-mod.cpp
+    ngram-mod.h
     regex-partial.cpp
     regex-partial.h
     )
