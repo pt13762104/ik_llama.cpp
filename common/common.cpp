@@ -21,6 +21,7 @@
 #include <climits>
 #include <cmath>
 #include <codecvt>
+#include <cstdlib>
 #include <cstdarg>
 #include <cstring>
 #include <ctime>
@@ -494,6 +495,7 @@ void gpt_params_parse_from_env(gpt_params & params) {
     get_env("LLAMA_ARG_CONT_BATCHING",    params.cont_batching);
     get_env("LLAMA_ARG_HOST",             params.hostname);
     get_env("LLAMA_ARG_PORT",             params.port);
+
 }
 
 bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
@@ -1461,6 +1463,14 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         params.cuda_params = argv[i];
         return true;
     }
+    if (arg == "-mtp" || arg == "--multi-token-prediction") {
+        params.has_mtp = true;
+        return true;
+    }
+    if (arg == "-no-mtp" || arg == "--no-multi-token-prediction") {
+        params.has_mtp = false;
+        return true;
+    }
     if (arg == "-draft" || arg == "--draft-params") {
         CHECK_ARG
         params.speculative.params = argv[i];
@@ -1505,7 +1515,7 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         params.merge_qkv = true;
         return true;
     }
-    if (arg == "-muge" || arg == "--merge-up-gate-expsrts") {
+    if (arg == "-muge" || arg == "--merge-up-gate-experts") {
         params.merge_up_gate_exps = true;
         return true;
     }
@@ -1519,6 +1529,11 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
     }
     if (arg == "-sas" || arg == "--scheduler-async") {
         params.scheduler_async = true;
+        return true;
+    }
+    if (arg == "-fdn" || arg == "--fused-delta-net") {
+        CHECK_ARG
+        params.fused_delta_net = std::stoi(argv[i]);
         return true;
     }
     if (arg == "-smf16" || arg == "--split-mode-f16") {
@@ -2026,6 +2041,16 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         }
         return true;
     }
+    if (arg == "--ctx-checkpoints") {
+        CHECK_ARG
+        params.ctx_checkpoints_n = std::stoi(argv[i]);
+        return true;
+    }
+    if (arg == "--ctx-checkpoints-interval") {
+        CHECK_ARG
+        params.ctx_checkpoints_interval = std::stoi(argv[i]);
+        return true;
+    }
     if (arg == "-cram" || arg == "--cache-ram") {
         CHECK_ARG
         params.cache_ram_mib = std::stoi(argv[i]);
@@ -2220,7 +2245,10 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
 
     options.push_back({ "*",           "-c,    --ctx-size N",           "size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx });
     options.push_back({ "*",           "-cd,   --ctx-size-draft N",     "size of the prompt context for the draft model (default: %d, 0 = loaded from model)", params.speculative.n_ctx });
-    options.push_back({ "*",           "-cram, --cache-ram N",           "set the maximum cache size in MiB (default: %d, -1 - no limit, 0 - disable)",params.cache_ram_mib });
+
+    options.push_back({ "*",           "--ctx-checkpoints N",           "max number of context checkpoints to create per slot (default: %d)",params.ctx_checkpoints_n});
+    options.push_back({ "*",           "--ctx-checkpoints-interval N",  "minimum number of tokens between each context checkpoint.  (default: %d, <=0 disable)",params.ctx_checkpoints_interval});
+    options.push_back({ "*",           "-cram, --cache-ram N",          "set the maximum cache size in MiB (default: %d, -1 - no limit, 0 - disable)",params.cache_ram_mib });
     options.push_back({ "*",           "-crs,  --cache-ram-similarity N",           "max of similarity of prompt tokens to cache tokens that triggers prompt cache (default: %.2f).",params.cache_ram_similarity });
     options.push_back({ "*",           "-cram-n-min --cache-ram-n-min N",           "minimum number of the cached tokens that triggers prompt cache (default: %d).", params.cache_ram_n_min });
     options.push_back({ "*",           "-n,    --predict N",            "number of tokens to predict (default: %d, -1 = infinity, -2 = until context filled)", params.n_predict });
@@ -2234,7 +2262,7 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",           "-amb,  --attention-max-batch",  "max batch size for attention computations (default: %d)", params.attn_max_batch});
     options.push_back({ "*",           "-no-fmoe, --no-fused-moe",      "disable fused MoE (default: %s)", params.fused_moe_up_gate ? "enabled" : "disabled" });
     options.push_back({ "*",           "-ger,  --grouped-expert-routing", "enable grouped expert routing (default: %s)", params.grouped_expert_routing ? "enabled" : "disabled" });
-    options.push_back({ "*",           "-no-fug, --no-fused-up-gate",   "disaable fused up-gate (default: %s)", params.fused_up_gate ? "enabled" : "disabled" });
+    options.push_back({ "*",           "-no-fug, --no-fused-up-gate",   "disable fused up-gate (default: %s)", params.fused_up_gate ? "enabled" : "disabled" });
     options.push_back({ "*",           "-no-mmad, --no-fused-mul-multiadd", "disable fused mul-multi_add (default: %s)", params.fused_mmad? "enabled" : "disabled" });
     //options.push_back({ "*",           "-rcache, --rope-cache",         "enable RoPE cache (default: %s)", params.rope_cache ? "enabled" : "disabled" });
     options.push_back({ "*",           "-gr, --graph-reuse",            "enable graph reuse (default: %s)", params.graph_reuse ? "enabled" : "disabled" });
@@ -2247,7 +2275,8 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",         "-smf32, --split-mode-f32,",       "Use f32 for data exchange between GPUs (default: %d)", false});
     options.push_back({ "*",         "-grt, --graph-reduce-type",       "Type for data exchange between GPUs (default: %s)", "f32"});
     options.push_back({ "*",         "-smgs, --split-mode-graph-scheduling,", "Force Split Mode Graph Scheduling (default: %d)", params.split_mode_graph_scheduling});
-    options.push_back({ "*",         "-sas,  ==scheduler_async,",       "Async evaluation of compute graphs: %d)", params.scheduler_async});
+    options.push_back({ "*",         "-sas,  --scheduler_async,",       "Async evaluation of compute graphs: %d)", params.scheduler_async});
+    options.push_back({ "*",         "-fdn,  --fused-delta-net N",      "Use fused delta-net when batch size is <= N with recurrent models: %d)", params.fused_delta_net});
     options.push_back({ "*",         "-vq, --validate-quants",          "validate quantized data while loading the model (default: %d)", params.validate_quants});
     options.push_back({ "*",           "-p,    --prompt PROMPT",        "prompt to start generation with\n"
                                                                         "in conversation mode, this will be used as system prompt\n"
@@ -2473,6 +2502,8 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",           "-hfr,  --hf-repo REPO",         "Hugging Face model repository (default: unused)" });
     options.push_back({ "*",           "-hff,  --hf-file FILE",         "Hugging Face model file (default: unused)" });
     options.push_back({ "*",           "-hft,  --hf-token TOKEN",       "Hugging Face access token (default: value from HF_TOKEN environment variable)" });
+    options.push_back({ "*", "-mtp, --multi-token-prediction",          "whether to use multi-token-prediction (if supported) (default: %s)", params.has_mtp ? "true" : "false" });
+    options.push_back({ "*", "-no-mtp, --no-multi-token-prediction",    "whether to use multi-token-prediction (if supported) (default: %s)", !params.has_mtp ? "true" : "false" });
     options.push_back({ "*", "--draft-max, --draft, --draft-n N",
                                                                         "number of tokens to draft for speculative decoding (default: %d)", params.speculative.n_max });
     options.push_back({ "*", "--draft-min, --draft-n-min N",   "minimum number of draft tokens to use for speculative decoding" });
@@ -3205,6 +3236,7 @@ struct llama_model_params common_model_params_to_llama(const gpt_params & params
     mparams.validate_quants = params.validate_quants;
     mparams.merge_qkv       = params.merge_qkv;
     mparams.merge_up_gate_exps = params.merge_up_gate_exps;
+    mparams.mtp             = params.has_mtp;
     if (params.kv_overrides.empty()) {
         mparams.kv_overrides = NULL;
     } else {
@@ -3323,10 +3355,13 @@ struct llama_context_params common_context_params_to_llama(const gpt_params & pa
     cparams.split_mode_graph_scheduling = params.split_mode_graph_scheduling;
     //cparams.split_mode_f16    = params.split_mode_f16;
     cparams.scheduler_async   = params.scheduler_async;
+    cparams.fused_delta_net   = params.fused_delta_net;
     cparams.min_experts       = params.min_experts;
     cparams.thresh_experts    = params.thresh_experts;
     cparams.only_active_experts = params.only_active_exps;
     cparams.max_extra_alloc   = params.max_extra_alloc_MiB;
+    cparams.mtp               = params.has_mtp;
+    cparams.mtp_op_type      = MTP_OP_NONE;
 
     cparams.type_k = kv_cache_type_from_str(params.cache_type_k);
     cparams.type_v = kv_cache_type_from_str(params.cache_type_v);
@@ -3639,7 +3674,7 @@ struct llama_model * llama_load_model_from_url(
         }
     }
 
-    return llama_load_model_from_file(path_model, params);
+    return llama_model_load_from_file(path_model, params);
 }
 
 struct llama_model * llama_load_model_from_hf(
@@ -4331,6 +4366,7 @@ void yaml_dump_non_result_info(FILE * stream, const gpt_params & params, const l
     //fprintf(stream, "split_mode_f16: %s # default: true\n", params.split_mode_f16 ? "true" : "false");
     fprintf(stream, "reduce_type: %s # default f16\n", params.reduce_type.c_str());
     fprintf(stream, "scheduler_async: %s # default: false\n", params.scheduler_async ? "true" : "false");
+    fprintf(stream, "fused_delta_net: %d # default: 0\n", params.fused_delta_net );
     fprintf(stream, "ser: %d,%g # defaulr: -1,0\n", params.min_experts, params.thresh_experts);
     fprintf(stream, "temp: %f # default: 0.8\n", sparams.temp);
 
