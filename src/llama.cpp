@@ -590,6 +590,7 @@ bool llama_context::update_cache_copies() {
                 GGML_ASSERT(kl->n_device == vl->n_device);
             }
             for (int id = 0; id < kl->n_device; ++id) {
+                if (!kl->splits[id]) continue;
                 auto& c = cache_copies[2*model.splits.size()*il + 2*id + 0];
                 if (!c.cpy || c.cpy->op != GGML_OP_CPY || c.cpy->view_src != kl->splits[id]) return false;
                 c.cpy->view_offs = kv_self.head*c.step;
@@ -598,6 +599,7 @@ bool llama_context::update_cache_copies() {
             }
             if (!vl) continue;
             for (int id = 0; id < vl->n_device; ++id) {
+                if (!vl->splits[id]) continue;
                 auto& c = cache_copies[2*model.splits.size()*il + 2*id + 1];
                 if (!c.cpy || c.cpy->op != GGML_OP_CPY || c.cpy->view_src != vl->splits[id]) return false;
                 c.cpy->view_offs = kv_self.head*c.step;
@@ -1512,6 +1514,7 @@ static void llm_load_print_meta(llama_model_loader & ml, llama_model & model) {
         LLAMA_LOG_INFO("%s: ssm_d_inner      = %u\n",     __func__, hparams.ssm_d_inner);
         LLAMA_LOG_INFO("%s: ssm_d_state      = %u\n",     __func__, hparams.ssm_d_state);
         LLAMA_LOG_INFO("%s: ssm_dt_rank      = %u\n",     __func__, hparams.ssm_dt_rank);
+        LLAMA_LOG_INFO("%s: ssm_n_group      = %u\n",     __func__, hparams.ssm_n_group);
     }
 
     LLAMA_LOG_INFO("%s: model type       = %s\n",     __func__, llama_model_type_name(model.type));
@@ -1938,6 +1941,7 @@ static bool is_model_split_supported(const llama_model & model) {
         LLM_ARCH_STEP35,
         LLM_ARCH_QWEN3NEXT,
         LLM_ARCH_QWEN35,
+        LLM_ARCH_QWEN35MOE,
     };
     auto it =  k_supported.find(model.arch);
     return it != k_supported.end();
@@ -4394,7 +4398,6 @@ struct llama_context_params llama_context_default_params() {
         /*.split_mode_graph_scheduling =*/ false,
         // /*.split_mode_f16           =*/ true,
         /*.scheduler_async             =*/ false,
-        /*.fused_delta_net             =*/ 0,
         /*.mtp                         =*/ false,
         /*.mtp_op_type                 =*/ MTP_OP_NONE,
         /*.abort_callback              =*/ nullptr,
@@ -4692,8 +4695,6 @@ struct llama_context * llama_init_from_model(
                  struct llama_model * model,
         struct llama_context_params   params) {
 
-    printf("===================================== %s: %s\n", __func__, ggml_type_name(params.type_reduce));
-
     if (!model) {
         LLAMA_LOG_ERROR("%s: model cannot be NULL\n", __func__);
         return nullptr;
@@ -4766,7 +4767,6 @@ struct llama_context * llama_init_from_model(
     cparams.split_mode_graph_scheduling = params.split_mode_graph_scheduling;
     //cparams.split_mode_f16   = params.split_mode_f16;
     cparams.scheduler_async  = params.scheduler_async;
-    cparams.fused_delta_net  = params.fused_delta_net;
     cparams.min_experts      = params.min_experts;
     cparams.thresh_experts   = params.thresh_experts;
     cparams.cuda_params      = params.cuda_params;
@@ -4873,7 +4873,6 @@ struct llama_context * llama_init_from_model(
     //LLAMA_LOG_INFO("%s: split_mode_f16= %d\n",     __func__, cparams.split_mode_f16);
     LLAMA_LOG_INFO("%s: reduce_type   = %s\n",     __func__, ggml_type_name(cparams.reduce_type));
     LLAMA_LOG_INFO("%s: sched_async   = %d\n",     __func__, cparams.scheduler_async);
-    LLAMA_LOG_INFO("%s: fused_delta   = %d\n",     __func__, cparams.fused_delta_net);
     LLAMA_LOG_INFO("%s: ser           = %d, %g\n", __func__, cparams.min_experts, cparams.thresh_experts);
     LLAMA_LOG_INFO("%s: freq_base     = %.1f\n",   __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale    = %g\n",     __func__, cparams.rope_freq_scale);
