@@ -1,6 +1,4 @@
-### This is a special testing branch for random things that I test. It includes an option, `GGML_CUDA_NO_TURING_MMA`, which makes Turing devices appears as if tensor cores don't exist. It's probably not a good idea to enable this option when you have RTX 20 series cards with GTX 16 ones.
-
-### Since iq1_s_r4 is not supported without MMA, you'll see compilation warnings. You can ignore them if you don't need iq1_s_r4.
+## ik_llama.cpp does NOT support anything that doesn't have tensor cores, and for latest models, performance is lagging behind llama.cpp by a lot. For this reason, this repo is archived.
 
 # ik_llama.cpp: llama.cpp fork with better CPU performance
 
